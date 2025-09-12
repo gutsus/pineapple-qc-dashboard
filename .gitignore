@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual envs
+qc_env/
+.venv/
+venv/
+
+# Streamlit
+.streamlit/
+.secrets/
