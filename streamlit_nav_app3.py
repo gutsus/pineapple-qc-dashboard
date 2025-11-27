@@ -1,12 +1,13 @@
 # streamlit_nav_app3.py
 # ——————————————————————————————————————————————————————————
 # Pineapple QC Dashboard
-# - Score colors fixed
-# - Custom supplier order in filters
-# - Pages:
-#     1) Score by Week
-#     2) Defect evolution
-#     3) Supplier ranking (only main suppliers)
+# Pages:
+#   1) Score by Week
+#   2) Defects – evolution & comparison
+#       - Stacked area (overview)
+#       - Supplier comparison (one defect, stacked charts)
+#       - Supplier comparison – lines
+#   3) Supplier ranking (main growers)
 # ——————————————————————————————————————————————————————————
 
 import os
@@ -20,7 +21,7 @@ import streamlit as st
 
 DATA_FILE = "mock_prototype_data_with_qc_defects.csv"
 
-# Corporate score colors
+# Corporate score colors (keep these – they’re semantic, not theme)
 SCORE_COLORS = {
     "4": "#78BE20",  # green (best)
     "3": "#FDA239",  # amber
@@ -29,10 +30,8 @@ SCORE_COLORS = {
 }
 SCORE_ORDER = ["4", "3", "2", "1"]
 
-# Bar text template: show integers, no decimals
 BAR_TEXT_TEMPLATE = "%{y:.0f}"
 
-# Main suppliers to highlight / rank
 CORE_SUPPLIERS_ORDER = [
     "LAS BRISAS",
     "AGRO INDUSTRIAL",
@@ -67,20 +66,18 @@ def _coalesce_cols(df: pd.DataFrame, candidates, new_name: str) -> None:
 @st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
     """Load CSV and normalise column names + basic cleaning."""
-    # Handle odd encodings automatically
     try:
         df = pd.read_csv(path, encoding="utf-8")
     except UnicodeDecodeError:
         df = pd.read_csv(path, encoding="latin-1")
 
-    # Normalise column names: remove non-alphanumerics, make lowercase
+    # Normalise column names
     new_cols = {}
     for c in df.columns:
         clean = re.sub(r"[^A-Za-z0-9]+", "", str(c)).lower()
         new_cols[c] = clean
     df.columns = [new_cols[c] for c in df.columns]
 
-    # Map possible source names to canonical ones
     _coalesce_cols(df, ["week", "shipmentweek", "yearweek"], "Week")
     _coalesce_cols(df, ["supplier", "grower", "producer"], "Supplier")
     _coalesce_cols(df, ["port", "entryport", "pod"], "Port")
@@ -88,17 +85,14 @@ def load_data(path: str) -> pd.DataFrame:
     _coalesce_cols(df, ["qualitycomment", "comment", "qccomment"], "QualityComment")
     _coalesce_cols(df, ["defects", "defect", "defectlist"], "Defects")
 
-    # Types
     df["Week"] = pd.to_numeric(df["Week"], errors="coerce").astype("Int64")
     df["Score"] = pd.to_numeric(df["Score"], errors="coerce").astype("Int64")
 
     df["Supplier"] = df["Supplier"].astype("string").str.strip()
     df["Port"] = df["Port"].astype("string").str.strip()
 
-    # Score as string for discrete color mapping
     df["ScoreStr"] = df["Score"].astype("Int64").astype("string")
 
-    # Defects → list
     def _split_defects(x):
         if pd.isna(x):
             return []
@@ -111,7 +105,6 @@ def load_data(path: str) -> pd.DataFrame:
 
 
 def kpi_tiles(df_f: pd.DataFrame) -> None:
-    """Show top KPI tiles for filtered data."""
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.metric("Total Containers (filtered)", f"{len(df_f):,}")
@@ -125,7 +118,6 @@ def kpi_tiles(df_f: pd.DataFrame) -> None:
 
 
 def add_discrete_score_colors(fig, score_col: str = "ScoreStr"):
-    """Apply common settings for score-based bar charts."""
     fig.update_traces(texttemplate=BAR_TEXT_TEMPLATE, textposition="inside")
     fig.update_layout(
         legend_title_text="Score",
@@ -136,20 +128,17 @@ def add_discrete_score_colors(fig, score_col: str = "ScoreStr"):
 
 
 def apply_corporate_theme(fig):
-    """Common layout for all charts."""
+    """
+    Minimal styling so that Streamlit's own theme (e.g. default dark)
+    controls background, grid, etc.
+    """
     fig.update_layout(
         font=dict(size=15),
-        xaxis_title=None,
-        yaxis_title=None,
-        bargap=0.12,
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
     )
     return fig
 
 
 def unique_sorted(series: pd.Series):
-    """Return sorted unique values; try numeric sort first."""
     vals = series.dropna().unique().tolist()
     try:
         vals_int = sorted({int(v) for v in vals})
@@ -176,7 +165,7 @@ with st.sidebar:
         "Go to",
         [
             "Score by Week",
-            "Defect evolution",
+            "Defects – evolution & comparison",
             "Supplier ranking",
         ],
         label_visibility="collapsed",
@@ -188,19 +177,15 @@ with st.sidebar:
     all_suppliers = [
         s for s in df["Supplier"].dropna().unique() if str(s).strip()
     ]
-    # Keep only those actually present, in your specified order
     core_in_data = [s for s in CORE_SUPPLIERS_ORDER if s in all_suppliers]
-    # The rest (excluding those already in core_in_data), sorted
     remaining = sorted([s for s in all_suppliers if s not in core_in_data])
     sup_opts = core_in_data + remaining
 
     sel_sup = st.multiselect("Supplier", sup_opts, placeholder="Choose options")
 
-    # Week filter
     wk_opts = unique_sorted(df["Week"])
     sel_wk = st.multiselect("Week", wk_opts, placeholder="Choose options")
 
-    # Port filter
     port_opts = sorted([p for p in df["Port"].dropna().unique() if str(p).strip()])
     sel_port = st.multiselect("Port", port_opts, placeholder="Choose options")
 
@@ -213,7 +198,6 @@ if sel_wk:
 if sel_port:
     df_f = df_f[df_f["Port"].isin(sel_port)]
 
-# Top KPI tiles
 kpi_tiles(df_f)
 
 # ------------------------------ PAGES -------------------------------
@@ -252,7 +236,7 @@ def page_score_by_week():
 
 
 def page_defect_evolution():
-    st.subheader("Defect evolution")
+    st.subheader("Defects – evolution & comparison")
 
     # Build list of defects from data, excluding 'Brown leaves'
     raw_defects = {d for row in df["DefectsList"] for d in row}
@@ -263,7 +247,126 @@ def page_defect_evolution():
         st.info("No defects found in data.")
         return
 
-    # Quick select / clear buttons
+    view = st.radio(
+        "View",
+        [
+            "Stacked area (overview)",
+            "Supplier comparison (one defect, stacked charts)",
+            "Supplier comparison – lines",
+        ],
+        index=0,
+        horizontal=True,
+    )
+
+    # ------------- VIEW 2: SUPPLIER COMPARISON – STACKED CHARTS -------------
+    if view == "Supplier comparison (one defect, stacked charts)":
+        defect_choice = st.selectbox("Defect to compare", options=all_defects)
+
+        sup_choices = st.multiselect(
+            "Suppliers to compare",
+            options=sorted(df_f["Supplier"].dropna().unique()),
+        )
+
+        if not sup_choices:
+            st.info("Select at least one supplier to compare.")
+            return
+
+        dff = df_f[df_f["Supplier"].isin(sup_choices)].copy()
+
+        rows = []
+        for _, r in dff.iterrows():
+            if pd.isna(r["Week"]):
+                continue
+            if defect_choice in r["DefectsList"]:
+                rows.append((r["Week"], r["Supplier"]))
+
+        if not rows:
+            st.info(
+                f"No '{defect_choice}' recorded for the selected suppliers under current filters."
+            )
+            return
+
+        dd = pd.DataFrame(rows, columns=["Week", "Supplier"])
+        dd["Week"] = dd["Week"].astype("Int64")
+
+        grp = (
+            dd.groupby(["Supplier", "Week"], as_index=False)
+            .size()
+            .rename(columns={"size": "Count"})
+        )
+        grp = grp.sort_values(["Supplier", "Week"])
+
+        for sup in sup_choices:
+            sub = grp[grp["Supplier"] == sup]
+            if sub.empty:
+                st.info(f"No '{defect_choice}' recorded for {sup}.")
+                continue
+
+            st.markdown(f"**{sup} – {defect_choice} over weeks**")
+            fig = px.bar(
+                sub,
+                x="Week",
+                y="Count",
+                text="Count",
+            )
+            fig.update_traces(texttemplate=BAR_TEXT_TEMPLATE, textposition="outside")
+            fig.update_yaxes(title="Containers with defect")
+            fig.update_xaxes(title="Week", dtick=1)
+            st.plotly_chart(apply_corporate_theme(fig), use_container_width=True)
+
+        return
+
+    # ------------- VIEW 3: SUPPLIER COMPARISON – LINES -------------
+    if view == "Supplier comparison – lines":
+        defect_choice = st.selectbox("Defect to compare", options=all_defects)
+
+        sup_choices = st.multiselect(
+            "Suppliers to include (optional – leave empty for all in current filters)",
+            options=sorted(df_f["Supplier"].dropna().unique()),
+        )
+
+        dff = df_f.copy()
+        if sup_choices:
+            dff = dff[dff["Supplier"].isin(sup_choices)]
+
+        rows = []
+        for _, r in dff.iterrows():
+            if pd.isna(r["Week"]):
+                continue
+            if defect_choice in r["DefectsList"]:
+                rows.append((r["Week"], r["Supplier"]))
+
+        if not rows:
+            st.info(
+                f"No '{defect_choice}' recorded for the selected filters."
+            )
+            return
+
+        dd = pd.DataFrame(rows, columns=["Week", "Supplier"])
+        dd["Week"] = dd["Week"].astype("Int64")
+
+        grp = (
+            dd.groupby(["Week", "Supplier"], as_index=False)
+            .size()
+            .rename(columns={"size": "Count"})
+        )
+        grp = grp.sort_values("Week")
+
+        fig = px.line(
+            grp,
+            x="Week",
+            y="Count",
+            color="Supplier",
+            markers=True,
+        )
+        fig.update_yaxes(title=f"Containers with {defect_choice}")
+        fig.update_xaxes(title="Week", dtick=1)
+        st.plotly_chart(apply_corporate_theme(fig), use_container_width=True)
+
+        return
+
+    # ------------- VIEW 1: STACKED AREA (OVERVIEW) -------------
+    # Quick select / clear buttons for defects
     cbtn1, cbtn2, _ = st.columns([1, 1, 6])
     with cbtn1:
         if st.button("Select all defects"):
@@ -273,35 +376,24 @@ def page_defect_evolution():
     with cbtn2:
         if st.button("Clear defects"):
             sel_def = []
-    # Multiselect with whatever default came from the buttons above
     sel_def = st.multiselect("Choose defects", options=all_defects, default=sel_def)
 
-    # Optional supplier filter (on top of global filters)
     sup_optional = st.multiselect(
         "Choose suppliers (optional)",
         options=sorted(df_f["Supplier"].dropna().unique()),
     )
 
-    # View type: stacked area (overview) or heatmap (overview)
-    view = st.radio(
-        "View",
-        ["Stacked area (overview)", "Heatmap (overview)"],
-        index=0,
-        horizontal=True,
-    )
-
-    # Apply global + optional supplier filters to defects
     dff = df_f.copy()
     if sup_optional:
         dff = dff[dff["Supplier"].isin(sup_optional)]
 
     rows = []
     for _, r in dff.iterrows():
+        if pd.isna(r["Week"]):
+            continue
         for d in r["DefectsList"]:
-            # skip Brown leaves completely
             if str(d).strip().lower() == "brown leaves":
                 continue
-            # if no specific selection, accept all; otherwise filter by sel_def
             if (not sel_def) or (d in sel_def):
                 rows.append((r["Week"], r["Supplier"], d))
 
@@ -309,54 +401,30 @@ def page_defect_evolution():
         st.info("No matching defects for current filters.")
         return
 
-    dd = (
-        pd.DataFrame(rows, columns=["Week", "Supplier", "Defect"])
-        .dropna(subset=["Week"])
-        .copy()
-    )
+    dd = pd.DataFrame(rows, columns=["Week", "Supplier", "Defect"])
     dd["Week"] = dd["Week"].astype("Int64")
 
-    if view.startswith("Stacked"):
-        # Stacked area by defect over time (overview)
-        grp = (
-            dd.groupby(["Week", "Defect"], as_index=False)
-            .size()
-            .rename(columns={"size": "Count"})
-        )
-        grp = grp.sort_values("Week")
-        fig = px.area(
-            grp,
-            x="Week",
-            y="Count",
-            color="Defect",
-            groupnorm=None,
-        )
-        fig.update_yaxes(title="Containers with defect")
-        st.plotly_chart(apply_corporate_theme(fig), use_container_width=True)
-
-    else:
-        # Heatmap (overview)
-        heat = (
-            dd.groupby(["Defect", "Week"], as_index=False)
-            .size()
-            .rename(columns={"size": "Count"})
-        )
-        fig = px.density_heatmap(
-            heat,
-            x="Week",
-            y="Defect",
-            z="Count",
-            color_continuous_scale="Blues",
-        )
-        fig.update_yaxes(title="Defect")
-        fig.update_xaxes(title="Week")
-        st.plotly_chart(apply_corporate_theme(fig), use_container_width=True)
+    grp = (
+        dd.groupby(["Week", "Defect"], as_index=False)
+        .size()
+        .rename(columns={"size": "Count"})
+    )
+    grp = grp.sort_values("Week")
+    fig = px.area(
+        grp,
+        x="Week",
+        y="Count",
+        color="Defect",
+        groupnorm=None,
+    )
+    fig.update_yaxes(title="Containers with defect")
+    fig.update_xaxes(title="Week", dtick=1)
+    st.plotly_chart(apply_corporate_theme(fig), use_container_width=True)
 
 
 def page_supplier_ranking():
     st.subheader("Supplier ranking – main growers")
 
-    # Only keep your main suppliers for ranking
     df_rank = df_f[df_f["Supplier"].isin(CORE_SUPPLIERS_ORDER)].copy()
     df_rank = df_rank.dropna(subset=["Supplier", "Score"])
 
@@ -364,7 +432,6 @@ def page_supplier_ranking():
         st.info("No data for the selected filters for the main suppliers.")
         return
 
-    # Aggregate metrics per supplier
     metrics = (
         df_rank.groupby("Supplier", as_index=False)
         .agg(
@@ -373,14 +440,12 @@ def page_supplier_ranking():
         )
     )
 
-    # Score distribution per supplier
     score_counts = (
         df_rank.groupby(["Supplier", "ScoreStr"], as_index=False)
         .size()
         .rename(columns={"size": "Count"})
     )
 
-    # Critical = score 1 or 2
     critical = (
         score_counts[score_counts["ScoreStr"].isin(["1", "2"])]
         .groupby("Supplier", as_index=False)["Count"]
@@ -390,14 +455,9 @@ def page_supplier_ranking():
 
     metrics = metrics.merge(critical, on="Supplier", how="left")
     metrics["Critical"] = metrics["Critical"].fillna(0)
-
-    # Percent of critical containers
     metrics["PctCritical"] = (metrics["Critical"] / metrics["Total"]) * 100.0
-
-    # QualityIndex 0–100, based on AvgScore 1–4
     metrics["QualityIndex"] = 100.0 * (metrics["AvgScore"] - 1.0) / 3.0
 
-    # Hard minimum volume threshold (in current filters)
     MIN_CONTAINERS = 70
     metrics = metrics[metrics["Total"] >= MIN_CONTAINERS]
 
@@ -407,18 +467,16 @@ def page_supplier_ranking():
         )
         return
 
-    # Round some fields for display
     metrics["AvgScoreRound"] = metrics["AvgScore"].round(2)
     metrics["QualityIndexRound"] = metrics["QualityIndex"].round(0)
     metrics["PctCriticalRound"] = metrics["PctCritical"].round(1)
 
-    # Sort by quality index first, then by volume
     metrics = metrics.sort_values(
         ["QualityIndex", "Total"], ascending=[False, False]
     )
     supplier_order = metrics["Supplier"].tolist()
 
-    # ---------------- Option 1 – Quality index bar ----------------
+    # 1 – Quality index bar
     st.markdown("##### 1 – Quality index (0–100)")
 
     fig1 = px.bar(
@@ -435,7 +493,7 @@ def page_supplier_ranking():
     fig1.update_yaxes(title=None)
     st.plotly_chart(apply_corporate_theme(fig1), use_container_width=True)
 
-    # ---------------- 2 – Volume bar ----------------
+    # 2 – Volume bar
     st.markdown("##### 2 – Volume (containers)")
 
     fig2 = px.bar(
@@ -452,10 +510,9 @@ def page_supplier_ranking():
     fig2.update_yaxes(title=None)
     st.plotly_chart(apply_corporate_theme(fig2), use_container_width=True)
 
-    # ---------------- 3 – Score mix per supplier ----------------
+    # 3 – Score mix per supplier
     st.markdown("##### 3 – Score mix per supplier")
 
-    # Use only suppliers that passed the 70-container threshold
     score_counts_th = score_counts[score_counts["Supplier"].isin(supplier_order)].copy()
     score_counts_th = score_counts_th.merge(
         metrics[["Supplier", "Total"]], on="Supplier", how="left"
@@ -486,7 +543,7 @@ def page_supplier_ranking():
     fig3.update_yaxes(title=None)
     st.plotly_chart(apply_corporate_theme(fig3), use_container_width=True)
 
-    # ---------------- Option 4 – Quality vs volume scatter ----------------
+    # 4 – Quality vs volume scatter
     st.markdown("##### 4 – Quality vs volume")
 
     fig4 = px.scatter(
@@ -514,10 +571,9 @@ def page_supplier_ranking():
 
 if page == "Score by Week":
     page_score_by_week()
-elif page == "Defect evolution":
+elif page == "Defects – evolution & comparison":
     page_defect_evolution()
 elif page == "Supplier ranking":
     page_supplier_ranking()
 
-# Optional cache clear button when iterating
 st.sidebar.button("Clear cache & rerun", on_click=st.cache_data.clear)
